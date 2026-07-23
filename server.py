@@ -93,7 +93,7 @@ async def start_subtitles(request: Request):
 
     start_payload = {
         "tokenName": builder_token,
-        "language": spoken_lang, 
+        "languages": [spoken_lang], 
         "agoraRtcConfig": {
             "channelName": channel_name,
             "uid": "999", 
