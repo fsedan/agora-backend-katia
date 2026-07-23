@@ -21,10 +21,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-APP_ID = os.getenv("AGORA_APP_ID")
-APP_CERTIFICATE = os.getenv("AGORA_APP_CERTIFICATE")
-CUSTOMER_KEY = os.getenv("AGORA_CUSTOMER_KEY")
-CUSTOMER_SECRET = os.getenv("AGORA_CUSTOMER_SECRET")
+APP_ID = os.getenv("AGORA_APP_ID", "").strip()
+APP_CERTIFICATE = os.getenv("AGORA_APP_CERTIFICATE", "").strip()
+CUSTOMER_KEY = os.getenv("AGORA_CUSTOMER_KEY", "").strip()
+CUSTOMER_SECRET = os.getenv("AGORA_CUSTOMER_SECRET", "").strip()
 
 # Diccionario en memoria para guardar el taskId de la transcripción y poder detenerla luego
 active_tasks = {}
