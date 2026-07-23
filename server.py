@@ -66,6 +66,8 @@ async def start_subtitles(request: Request):
     """
     body = await request.json()
     channel_name = body.get("channelName")
+    spoken_lang = body.get("spokenLang", "es-ES")
+    subtitle_lang = body.get("subtitleLang", "es-ES")
     
     if not channel_name:
         raise HTTPException(status_code=400, detail="channelName is required")
@@ -85,23 +87,34 @@ async def start_subtitles(request: Request):
     # PASO 2: Iniciar el bot de transcripción (Start Task)
     start_url = f"https://api.agora.io/v1/projects/{APP_ID}/rtsc/speech-to-text/tasks"
     
+    features = ["RECOGNIZE"]
+    if spoken_lang != subtitle_lang:
+        features.append("TRANSLATE")
+
     start_payload = {
         "tokenName": builder_token,
-        "language": "es-ES", # Español como base
+        "language": spoken_lang, 
         "agoraRtcConfig": {
             "channelName": channel_name,
-            "uid": "999", # UID del bot de transcripción
+            "uid": "999", 
             "token": RtcTokenBuilder.buildTokenWithUid(
                 APP_ID, APP_CERTIFICATE, channel_name, 999, 1, int(time.time()) + 7200
             )
         },
         "config": {
-            "features": ["RECOGNIZE"],
+            "features": features,
             "recognizeConfig": {
-                "language": "es-ES"
+                "language": spoken_lang
             }
         }
     }
+
+    if "TRANSLATE" in features:
+        start_payload["config"]["translateConfig"] = {
+            "languages": [
+                {"source": spoken_lang, "target": [subtitle_lang]}
+            ]
+        }
 
     start_resp = requests.post(start_url, json=start_payload, headers=headers)
     
