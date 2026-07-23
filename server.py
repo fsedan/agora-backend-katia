@@ -80,7 +80,7 @@ async def start_subtitles(request: Request):
     
     acquire_resp = requests.post(acquire_url, json=acquire_payload, headers=headers)
     if acquire_resp.status_code != 200:
-        raise HTTPException(status_code=500, detail=f"Failed to acquire token: {acquire_resp.text}")
+        raise HTTPException(status_code=500, detail=f"Failed to acquire token for APP_ID '{APP_ID}': {acquire_resp.text}")
     
     builder_token = acquire_resp.json().get("tokenName")
 
