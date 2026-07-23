@@ -6,7 +6,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
-from agora_token_builder import RtcTokenBuilder, Role_Attendee
+from agora_token_builder import RtcTokenBuilder
 
 load_dotenv()
 
@@ -55,7 +55,7 @@ def generate_token(channelName: str, uid: int = 0):
     privilege_expired_ts = current_time + expiration_time
 
     token = RtcTokenBuilder.buildTokenWithUid(
-        APP_ID, APP_CERTIFICATE, channelName, uid, Role_Attendee, privilege_expired_ts
+        APP_ID, APP_CERTIFICATE, channelName, uid, 1, privilege_expired_ts
     )
     return {"token": token, "uid": uid, "channelName": channelName}
 
@@ -92,7 +92,7 @@ async def start_subtitles(request: Request):
             "channelName": channel_name,
             "uid": "999", # UID del bot de transcripción
             "token": RtcTokenBuilder.buildTokenWithUid(
-                APP_ID, APP_CERTIFICATE, channel_name, 999, Role_Attendee, int(time.time()) + 7200
+                APP_ID, APP_CERTIFICATE, channel_name, 999, 1, int(time.time()) + 7200
             )
         },
         "config": {
