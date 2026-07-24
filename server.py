@@ -82,6 +82,7 @@ async def start_subtitles(request: Request):
     )
 
     join_payload = {
+        "name": f"katia_stt_{channel_name}_{int(time.time())}",
         "languages": [spoken_lang], 
         "maxIdleTime": 60,
         "rtcConfig": {
