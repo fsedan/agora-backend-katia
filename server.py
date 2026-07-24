@@ -62,7 +62,7 @@ def generate_token(channelName: str, uid: int = 0):
 @app.post("/start-subtitles")
 async def start_subtitles(request: Request):
     """
-    Inicia la tarea de subtítulos (STT) enviando una orden a los servidores de Agora.
+    Inicia la tarea de subtítulos (STT) enviando una orden a los servidores de Agora (API v7).
     """
     body = await request.json()
     channel_name = body.get("channelName")
@@ -74,17 +74,7 @@ async def start_subtitles(request: Request):
 
     headers = get_basic_auth_header()
 
-    # PASO 1: Pedir permiso (Acquire Builder Token)
-    acquire_url = f"https://api.agora.io/v1/projects/{APP_ID}/rtsc/speech-to-text/builderTokens"
-    acquire_payload = {"instanceId": f"katia_stt_{channel_name}_{int(time.time())}"}
-    
-    acquire_resp = requests.post(acquire_url, json=acquire_payload, headers=headers)
-    if acquire_resp.status_code != 200:
-        raise HTTPException(status_code=500, detail=f"Failed to acquire token for APP_ID '{APP_ID}': {acquire_resp.text}")
-    
-    builder_token = acquire_resp.json().get("tokenName")
-
-    # PASO 2: Iniciar el bot de transcripción (Start Task)
+    # PASO ÚNICO: Start Task (API v7)
     start_url = f"https://api.agora.io/v1/projects/{APP_ID}/rtsc/speech-to-text/tasks"
     
     features = ["RECOGNIZE"]
@@ -92,12 +82,16 @@ async def start_subtitles(request: Request):
         features.append("TRANSLATE")
 
     start_payload = {
-        "tokenName": builder_token,
         "languages": [spoken_lang], 
-        "agoraRtcConfig": {
+        "maxIdleTime": 60,
+        "rtcConfig": {
             "channelName": channel_name,
-            "uid": "999", 
-            "token": RtcTokenBuilder.buildTokenWithUid(
+            "subBotUid": "999", 
+            "subBotToken": RtcTokenBuilder.buildTokenWithUid(
+                APP_ID, APP_CERTIFICATE, channel_name, 999, 1, int(time.time()) + 7200
+            ),
+            "pubBotUid": "999",
+            "pubBotToken": RtcTokenBuilder.buildTokenWithUid(
                 APP_ID, APP_CERTIFICATE, channel_name, 999, 1, int(time.time()) + 7200
             )
         },
@@ -116,22 +110,29 @@ async def start_subtitles(request: Request):
             ]
         }
 
+    # Intentamos primero con la ruta clásica de v7
     start_resp = requests.post(start_url, json=start_payload, headers=headers)
     
+    # Si da error de Not Found, probamos la ruta alternativa de v7 /join
+    if start_resp.status_code == 404:
+        join_url = f"https://api.agora.io/api/speech-to-text/v1/projects/{APP_ID}/join"
+        start_resp = requests.post(join_url, json=start_payload, headers=headers)
+        
     if start_resp.status_code != 200:
         raise HTTPException(status_code=500, detail=f"Failed to start STT: {start_resp.text}")
     
-    task_id = start_resp.json().get("taskId")
+    resp_json = start_resp.json()
+    task_id = resp_json.get("taskId") or resp_json.get("agent_id") or "unknown_task"
     
     # Guardamos el task_id para poder apagarlo después
-    active_tasks[channel_name] = {"taskId": task_id, "builderToken": builder_token}
+    active_tasks[channel_name] = {"taskId": task_id}
 
     return {"status": "success", "taskId": task_id, "message": "Subtitles AI joined the room"}
 
 @app.post("/stop-subtitles")
 async def stop_subtitles(request: Request):
     """
-    Detiene la transcripción de Agora y saca al bot de la sala para ahorrar minutos.
+    Detiene la transcripción de Agora y saca al bot de la sala.
     """
     body = await request.json()
     channel_name = body.get("channelName")
@@ -141,18 +142,19 @@ async def stop_subtitles(request: Request):
     
     task_info = active_tasks[channel_name]
     task_id = task_info["taskId"]
-    builder_token = task_info["builderToken"]
     
     headers = get_basic_auth_header()
-    stop_url = f"https://api.agora.io/v1/projects/{APP_ID}/rtsc/speech-to-text/tasks/{task_id}?builderToken={builder_token}"
+    stop_url = f"https://api.agora.io/v1/projects/{APP_ID}/rtsc/speech-to-text/tasks/{task_id}"
     
     stop_resp = requests.delete(stop_url, headers=headers)
     
-    if stop_resp.status_code == 200:
-        del active_tasks[channel_name]
-        return {"status": "success", "message": "Subtitles AI stopped"}
-    else:
-        raise HTTPException(status_code=500, detail=f"Failed to stop STT: {stop_resp.text}")
+    # Intentamos la ruta alternativa si la primera no funciona
+    if stop_resp.status_code == 404:
+        leave_url = f"https://api.agora.io/api/speech-to-text/v1/projects/{APP_ID}/leave"
+        requests.post(leave_url, json={"agent_id": task_id}, headers=headers)
+    
+    del active_tasks[channel_name]
+    return {"status": "success", "message": "Subtitles AI stopped"}
 
 if __name__ == "__main__":
     import uvicorn
