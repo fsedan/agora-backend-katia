@@ -62,7 +62,7 @@ def generate_token(channelName: str, uid: int = 0):
 @app.post("/start-subtitles")
 async def start_subtitles(request: Request):
     """
-    Inicia la tarea de subtítulos (STT) enviando una orden a los servidores de Agora (API v7).
+    Inicia la tarea de subtítulos (STT) usando estrictamente la API v7 de Agora.
     """
     body = await request.json()
     channel_name = body.get("channelName")
@@ -75,48 +75,33 @@ async def start_subtitles(request: Request):
     headers = get_basic_auth_header()
 
     # PASO ÚNICO: Start Task (API v7)
-    start_url = f"https://api.agora.io/v1/projects/{APP_ID}/rtsc/speech-to-text/tasks"
+    join_url = f"https://api.agora.io/api/speech-to-text/v1/projects/{APP_ID}/join"
     
-    features = ["RECOGNIZE"]
-    if spoken_lang != subtitle_lang:
-        features.append("TRANSLATE")
+    bot_token = RtcTokenBuilder.buildTokenWithUid(
+        APP_ID, APP_CERTIFICATE, channel_name, 999, 1, int(time.time()) + 7200
+    )
 
-    start_payload = {
+    join_payload = {
         "languages": [spoken_lang], 
         "maxIdleTime": 60,
         "rtcConfig": {
             "channelName": channel_name,
             "subBotUid": "999", 
-            "subBotToken": RtcTokenBuilder.buildTokenWithUid(
-                APP_ID, APP_CERTIFICATE, channel_name, 999, 1, int(time.time()) + 7200
-            ),
+            "subBotToken": bot_token,
             "pubBotUid": "999",
-            "pubBotToken": RtcTokenBuilder.buildTokenWithUid(
-                APP_ID, APP_CERTIFICATE, channel_name, 999, 1, int(time.time()) + 7200
-            )
-        },
-        "config": {
-            "features": features,
-            "recognizeConfig": {
-                "language": spoken_lang
-            }
+            "pubBotToken": bot_token
         }
     }
 
-    if "TRANSLATE" in features:
-        start_payload["config"]["translateConfig"] = {
+    if spoken_lang != subtitle_lang:
+        join_payload["translateConfig"] = {
+            "enable": True,
             "languages": [
                 {"source": spoken_lang, "target": [subtitle_lang]}
             ]
         }
 
-    # Intentamos primero con la ruta clásica de v7
-    start_resp = requests.post(start_url, json=start_payload, headers=headers)
-    
-    # Si da error de Not Found, probamos la ruta alternativa de v7 /join
-    if start_resp.status_code == 404:
-        join_url = f"https://api.agora.io/api/speech-to-text/v1/projects/{APP_ID}/join"
-        start_resp = requests.post(join_url, json=start_payload, headers=headers)
+    start_resp = requests.post(join_url, json=join_payload, headers=headers)
         
     if start_resp.status_code != 200:
         raise HTTPException(status_code=500, detail=f"Failed to start STT: {start_resp.text}")
@@ -124,7 +109,6 @@ async def start_subtitles(request: Request):
     resp_json = start_resp.json()
     task_id = resp_json.get("taskId") or resp_json.get("agent_id") or "unknown_task"
     
-    # Guardamos el task_id para poder apagarlo después
     active_tasks[channel_name] = {"taskId": task_id}
 
     return {"status": "success", "taskId": task_id, "message": "Subtitles AI joined the room"}
@@ -132,7 +116,7 @@ async def start_subtitles(request: Request):
 @app.post("/stop-subtitles")
 async def stop_subtitles(request: Request):
     """
-    Detiene la transcripción de Agora y saca al bot de la sala.
+    Detiene la transcripción de Agora (API v7).
     """
     body = await request.json()
     channel_name = body.get("channelName")
@@ -144,14 +128,10 @@ async def stop_subtitles(request: Request):
     task_id = task_info["taskId"]
     
     headers = get_basic_auth_header()
-    stop_url = f"https://api.agora.io/v1/projects/{APP_ID}/rtsc/speech-to-text/tasks/{task_id}"
+    leave_url = f"https://api.agora.io/api/speech-to-text/v1/projects/{APP_ID}/leave"
     
-    stop_resp = requests.delete(stop_url, headers=headers)
-    
-    # Intentamos la ruta alternativa si la primera no funciona
-    if stop_resp.status_code == 404:
-        leave_url = f"https://api.agora.io/api/speech-to-text/v1/projects/{APP_ID}/leave"
-        requests.post(leave_url, json={"agent_id": task_id}, headers=headers)
+    # Mandamos tanto agent_id como taskId por compatibilidad con distintas nomenclaturas de la API
+    requests.post(leave_url, json={"agent_id": task_id, "taskId": task_id}, headers=headers)
     
     del active_tasks[channel_name]
     return {"status": "success", "message": "Subtitles AI stopped"}
