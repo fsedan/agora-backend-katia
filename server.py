@@ -72,6 +72,9 @@ def translate_text(text: str, source_lang: str, target_lang: str) -> str:
         target_dl = "EN-US"
     elif target_lang == "en-GB":
         target_dl = "EN-GB"
+    elif target_lang.startswith("pt"):
+        target_dl = "PT-PT"  # DeepL requiere PT-PT o PT-BR
+
 
     url = "https://api-free.deepl.com/v2/translate"
     headers = {
