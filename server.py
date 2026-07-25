@@ -3,6 +3,7 @@ import base64
 import requests
 import time
 import json
+import asyncio
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
@@ -180,7 +181,7 @@ async def websocket_endpoint(websocket: WebSocket, channel_name: str):
             # Solo traducir si son diferentes
             translated_text = original_text
             if source_lang.split("-")[0] != target_lang.split("-")[0]:
-                translated_text = translate_text(original_text, source_lang, target_lang)
+                translated_text = await asyncio.to_thread(translate_text, original_text, source_lang, target_lang)
                 
             # Broadcast a la sala
             await manager.broadcast({
