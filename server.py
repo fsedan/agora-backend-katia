@@ -61,40 +61,26 @@ def generate_token(channelName: str, uid: int = 0):
 
 @app.post("/start-subtitles")
 async def start_subtitles(request: Request):
-    """
-    Inicia la tarea de subtítulos (STT) usando estrictamente la API v7 de Agora.
-    """
     body = await request.json()
     channel_name = body.get("channelName")
-    spoken_lang = body.get("spokenLang", "es-ES")
-    subtitle_lang = body.get("subtitleLang", "es-ES")
+    spoken_lang = body.get("spokenLang")
+    subtitle_lang = body.get("subtitleLang")
+    doctor_uid = body.get("doctorUid")
+    patient_uid = body.get("patientUid")
     
-    if not channel_name:
-        raise HTTPException(status_code=400, detail="channelName is required")
+    if not channel_name or not spoken_lang or not subtitle_lang:
+        raise HTTPException(status_code=400, detail="Missing required fields")
+
+    # Si ya hay tareas activas, detenerlas primero
+    if channel_name in active_tasks:
+        try:
+            await stop_subtitles(request)
+        except:
+            pass
 
     headers = get_basic_auth_header()
-
-    # PASO ÚNICO: Start Task (API v7)
     join_url = f"https://api.agora.io/api/speech-to-text/v1/projects/{APP_ID}/join"
-    
-    bot_token = RtcTokenBuilder.buildTokenWithUid(
-        APP_ID, APP_CERTIFICATE, channel_name, 999, 1, int(time.time()) + 7200
-    )
 
-    join_payload = {
-        "name": f"katia_stt_{channel_name}_{int(time.time())}",
-        "languages": [spoken_lang], 
-        "maxIdleTime": 60,
-        "rtcConfig": {
-            "channelName": channel_name,
-            "subBotUid": "999", 
-            "subBotToken": bot_token,
-            "pubBotUid": "999",
-            "pubBotToken": bot_token
-        }
-    }
-
-    # Map target languages to 2-letter codes for Azure Translation compatibility
     target_lang_map = {
         "es-ES": "es",
         "en-US": "en",
@@ -107,30 +93,74 @@ async def start_subtitles(request: Request):
     azure_spoken = target_lang_map.get(spoken_lang, spoken_lang)
     azure_target = target_lang_map.get(subtitle_lang, subtitle_lang)
 
-    # Permitir que el bot escuche y reconozca ambos idiomas en la sala
-    unique_languages = list(set([spoken_lang, subtitle_lang]))
-    join_payload["languages"] = unique_languages
+    # 1. BOT PARA EL DOCTOR (Entiende spoken_lang, traduce a subtitle_lang)
+    bot_token_doc = RtcTokenBuilder.buildTokenWithUid(
+        APP_ID, APP_CERTIFICATE, channel_name, 998, 1, int(time.time()) + 7200
+    )
+    payload_doc = {
+        "name": f"stt_doc_{channel_name}_{int(time.time())}",
+        "languages": [spoken_lang], 
+        "maxIdleTime": 60,
+        "rtcConfig": {
+            "channelName": channel_name,
+            "subBotUid": "998", 
+            "subBotToken": bot_token_doc,
+            "pubBotUid": "998",
+            "pubBotToken": bot_token_doc
+        }
+    }
+    
+    # El bot del doctor SOLO escucha al doctor para máxima precisión
+    if doctor_uid:
+        payload_doc["rtcConfig"]["subscribeAudioUid"] = [str(doctor_uid)]
 
     if spoken_lang != subtitle_lang:
-        join_payload["translateConfig"] = {
+        payload_doc["translateConfig"] = {
             "enable": True,
-            "languages": [
-                {"source": spoken_lang, "target": [azure_target]},
-                {"source": subtitle_lang, "target": [azure_spoken]}
-            ]
+            "languages": [{"source": spoken_lang, "target": [azure_target]}]
         }
 
-    start_resp = requests.post(join_url, json=join_payload, headers=headers)
-        
-    if start_resp.status_code != 200:
-        raise HTTPException(status_code=500, detail=f"Failed to start STT: {start_resp.text}")
+    start_resp_doc = requests.post(join_url, json=payload_doc, headers=headers)
+    if start_resp_doc.status_code != 200:
+        raise HTTPException(status_code=500, detail=f"Failed to start Doc STT: {start_resp_doc.text}")
     
-    resp_json = start_resp.json()
-    task_id = resp_json.get("taskId") or resp_json.get("agent_id") or "unknown_task"
-    
-    active_tasks[channel_name] = {"taskId": task_id}
+    task_id_doc = start_resp_doc.json().get("taskId") or start_resp_doc.json().get("agent_id")
 
-    return {"status": "success", "taskId": task_id, "message": "Subtitles AI joined the room"}
+    # 2. BOT PARA EL PACIENTE (Entiende subtitle_lang, traduce a spoken_lang)
+    # SOLO se lanza si el paciente ya está en la sala y los idiomas son distintos
+    task_id_pat = None
+    if patient_uid and spoken_lang != subtitle_lang:
+        bot_token_pat = RtcTokenBuilder.buildTokenWithUid(
+            APP_ID, APP_CERTIFICATE, channel_name, 999, 1, int(time.time()) + 7200
+        )
+        payload_pat = {
+            "name": f"stt_pat_{channel_name}_{int(time.time())}",
+            "languages": [subtitle_lang], 
+            "maxIdleTime": 60,
+            "rtcConfig": {
+                "channelName": channel_name,
+                "subBotUid": "999", 
+                "subBotToken": bot_token_pat,
+                "pubBotUid": "999",
+                "pubBotToken": bot_token_pat,
+                "subscribeAudioUid": [str(patient_uid)]
+            },
+            "translateConfig": {
+                "enable": True,
+                "languages": [{"source": subtitle_lang, "target": [azure_spoken]}]
+            }
+        }
+        
+        start_resp_pat = requests.post(join_url, json=payload_pat, headers=headers)
+        if start_resp_pat.status_code == 200:
+            task_id_pat = start_resp_pat.json().get("taskId") or start_resp_pat.json().get("agent_id")
+
+    active_tasks[channel_name] = {
+        "taskId": task_id_doc,
+        "taskIdPat": task_id_pat
+    }
+
+    return {"status": "success", "taskId": task_id_doc, "message": "Bidirectional STT joined"}
 
 @app.post("/stop-subtitles")
 async def stop_subtitles(request: Request):
@@ -144,13 +174,16 @@ async def stop_subtitles(request: Request):
         return {"status": "ignored", "message": "No active STT task found for this channel"}
     
     task_info = active_tasks[channel_name]
-    task_id = task_info["taskId"]
+    task_id_doc = task_info.get("taskId")
+    task_id_pat = task_info.get("taskIdPat")
     
     headers = get_basic_auth_header()
     leave_url = f"https://api.agora.io/api/speech-to-text/v1/projects/{APP_ID}/leave"
     
-    # Mandamos tanto agent_id como taskId por compatibilidad con distintas nomenclaturas de la API
-    requests.post(leave_url, json={"agent_id": task_id, "taskId": task_id}, headers=headers)
+    if task_id_doc:
+        requests.post(leave_url, json={"agent_id": task_id_doc, "taskId": task_id_doc}, headers=headers)
+    if task_id_pat:
+        requests.post(leave_url, json={"agent_id": task_id_pat, "taskId": task_id_pat}, headers=headers)
     
     del active_tasks[channel_name]
     return {"status": "success", "message": "Subtitles AI stopped"}
