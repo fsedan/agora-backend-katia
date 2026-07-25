@@ -27,7 +27,7 @@ CUSTOMER_KEY = os.getenv("AGORA_CUSTOMER_KEY", "").strip()
 CUSTOMER_SECRET = os.getenv("AGORA_CUSTOMER_SECRET", "").strip()
 
 # Diccionario en memoria para guardar el taskId de la transcripción y poder detenerla luego
-active_tasks. = {}
+active_tasks = {}
 
 def get_basic_auth_header():
     credentials = f"{CUSTOMER_KEY}:{CUSTOMER_SECRET}"
