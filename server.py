@@ -156,7 +156,13 @@ async def websocket_endpoint(websocket: WebSocket, channel_name: str):
         while True:
             data = await websocket.receive_text()
             payload = json.loads(data)
+            msg_type = payload.get("type", "TEXT")
             
+            if msg_type in ["START_STT", "STOP_STT"]:
+                # Es un mensaje de control, lo retransmitimos tal cual a toda la sala
+                await manager.broadcast(payload, channel_name)
+                continue
+                
             uid = payload.get("uid")
             is_doctor = payload.get("isDoctor", False)
             original_text = payload.get("text", "")
