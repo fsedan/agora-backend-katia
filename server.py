@@ -95,7 +95,6 @@ async def start_subtitles(request: Request):
     }
 
     # Map target languages to 2-letter codes for Azure Translation compatibility
-    # Azure Translation API (used by Agora) often expects 'fr', 'de', 'it' rather than 'fr-FR'
     target_lang_map = {
         "es-ES": "es",
         "en-US": "en",
@@ -105,13 +104,19 @@ async def start_subtitles(request: Request):
         "ro-RO": "ro"
     }
     
-    azure_target_lang = target_lang_map.get(subtitle_lang, subtitle_lang)
+    azure_spoken = target_lang_map.get(spoken_lang, spoken_lang)
+    azure_target = target_lang_map.get(subtitle_lang, subtitle_lang)
+
+    # Permitir que el bot escuche y reconozca ambos idiomas en la sala
+    unique_languages = list(set([spoken_lang, subtitle_lang]))
+    join_payload["languages"] = unique_languages
 
     if spoken_lang != subtitle_lang:
         join_payload["translateConfig"] = {
             "enable": True,
             "languages": [
-                {"source": spoken_lang, "target": [azure_target_lang]}
+                {"source": spoken_lang, "target": [azure_target]},
+                {"source": subtitle_lang, "target": [azure_spoken]}
             ]
         }
 
