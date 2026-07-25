@@ -2,7 +2,8 @@ import os
 import base64
 import requests
 import time
-from fastapi import FastAPI, HTTPException, Request
+import json
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
@@ -23,170 +24,170 @@ app.add_middleware(
 
 APP_ID = os.getenv("AGORA_APP_ID", "").strip()
 APP_CERTIFICATE = os.getenv("AGORA_APP_CERTIFICATE", "").strip()
-CUSTOMER_KEY = os.getenv("AGORA_CUSTOMER_KEY", "").strip()
-CUSTOMER_SECRET = os.getenv("AGORA_CUSTOMER_SECRET", "").strip()
 
-# Diccionario en memoria para guardar el taskId de la transcripción y poder detenerla luego
-active_tasks = {}
+# Claves de las IAs
+DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY", "d76a065bbba6b31d34d3961140fe90fcea6d9f1b").strip()
+DEEPL_API_KEY = os.getenv("DEEPL_API_KEY", "786f1cec-dc44-41d2-a693-dd0feaa2414f:fx").strip()
 
-def get_basic_auth_header():
-    credentials = f"{CUSTOMER_KEY}:{CUSTOMER_SECRET}"
-    encoded = base64.b64encode(credentials.encode('utf-8')).decode('utf-8')
-    return {
-        "Authorization": f"Basic {encoded}",
+# Gestor de Conexiones WebSocket por sala (canal)
+class ConnectionManager:
+    def __init__(self):
+        # channel_name -> list of WebSockets
+        self.active_connections: dict[str, list[WebSocket]] = {}
+        # channel_name -> { "spokenLang": "es", "subtitleLang": "en" }
+        self.channel_configs = {}
+
+    async def connect(self, websocket: WebSocket, channel_name: str):
+        await websocket.accept()
+        if channel_name not in self.active_connections:
+            self.active_connections[channel_name] = []
+        self.active_connections[channel_name].append(websocket)
+
+    def disconnect(self, websocket: WebSocket, channel_name: str):
+        if channel_name in self.active_connections:
+            self.active_connections[channel_name].remove(websocket)
+            if not self.active_connections[channel_name]:
+                del self.active_connections[channel_name]
+
+    async def broadcast(self, message: dict, channel_name: str):
+        if channel_name in self.active_connections:
+            for connection in self.active_connections[channel_name]:
+                try:
+                    await connection.send_json(message)
+                except:
+                    pass
+
+manager = ConnectionManager()
+
+def translate_text(text: str, source_lang: str, target_lang: str) -> str:
+    """Traduce texto usando la API de DeepL"""
+    if not text or not text.strip():
+        return ""
+    
+    # DeepL usa códigos de 2 letras, ej: "es-ES" -> "ES"
+    # Pero "en-US" -> "EN-US" en DeepL (o solo "EN")
+    target_dl = target_lang.split("-")[0].upper()
+    if target_lang == "en-US":
+        target_dl = "EN-US"
+    elif target_lang == "en-GB":
+        target_dl = "EN-GB"
+
+    url = "https://api-free.deepl.com/v2/translate"
+    headers = {
+        "Authorization": f"DeepL-Auth-Key {DEEPL_API_KEY}",
         "Content-Type": "application/json"
     }
+    data = {
+        "text": [text],
+        "target_lang": target_dl
+    }
+    
+    try:
+        resp = requests.post(url, headers=headers, json=data)
+        if resp.status_code == 200:
+            return resp.json()["translations"][0]["text"]
+        else:
+            print(f"DeepL Error: {resp.text}")
+            return text
+    except Exception as e:
+        print(f"Translation exception: {e}")
+        return text
 
 @app.get("/")
 def read_root():
-    return {"status": "Katiatupediatra Agora STT Backend is running"}
+    return {"status": "Katiatupediatra Realtime AI Backend is running"}
+
+@app.get("/get-ai-keys")
+def get_ai_keys():
+    """Devuelve las claves al frontend para que se conecte directamente a Deepgram"""
+    return {
+        "deepgram": DEEPGRAM_API_KEY
+    }
 
 @app.get("/generate-token")
 def generate_token(channelName: str, uid: int = 0):
-    """
-    Genera el token seguro de Agora para que Katia y el paciente entren a la videollamada.
-    """
     if not APP_ID or not APP_CERTIFICATE:
         raise HTTPException(status_code=500, detail="Missing App ID or Certificate")
-    
-    # El token expira en 2 horas (7200 segundos)
     expiration_time = 7200
     current_time = int(time.time())
-    privilege_expired_ts = current_time + expiration_time
-
     token = RtcTokenBuilder.buildTokenWithUid(
-        APP_ID, APP_CERTIFICATE, channelName, uid, 1, privilege_expired_ts
+        APP_ID, APP_CERTIFICATE, channelName, uid, 1, current_time + expiration_time
     )
     return {"token": token, "uid": uid, "channelName": channelName}
 
 @app.post("/start-subtitles")
 async def start_subtitles(request: Request):
+    """
+    Ahora solo guarda la configuración de idiomas de la sala. 
+    Ya no lanza bots de Agora.
+    """
     body = await request.json()
     channel_name = body.get("channelName")
     spoken_lang = body.get("spokenLang")
     subtitle_lang = body.get("subtitleLang")
-    doctor_uid = body.get("doctorUid")
-    patient_uid = body.get("patientUid")
     
-    if not channel_name or not spoken_lang or not subtitle_lang:
-        raise HTTPException(status_code=400, detail="Missing required fields")
-
-    # Si ya hay tareas activas, detenerlas primero
-    if channel_name in active_tasks:
-        try:
-            await stop_subtitles(request)
-        except:
-            pass
-
-    headers = get_basic_auth_header()
-    join_url = f"https://api.agora.io/api/speech-to-text/v1/projects/{APP_ID}/join"
-
-    target_lang_map = {
-        "es-ES": "es",
-        "en-US": "en",
-        "fr-FR": "fr",
-        "de-DE": "de",
-        "it-IT": "it",
-        "ro-RO": "ro"
-    }
-    
-    azure_spoken = target_lang_map.get(spoken_lang, spoken_lang)
-    azure_target = target_lang_map.get(subtitle_lang, subtitle_lang)
-
-    # 1. BOT PARA EL DOCTOR (Entiende spoken_lang, traduce a subtitle_lang)
-    bot_token_doc = RtcTokenBuilder.buildTokenWithUid(
-        APP_ID, APP_CERTIFICATE, channel_name, 998, 1, int(time.time()) + 7200
-    )
-    payload_doc = {
-        "name": f"stt_doc_{channel_name}_{int(time.time())}",
-        "languages": [spoken_lang], 
-        "maxIdleTime": 60,
-        "rtcConfig": {
-            "channelName": channel_name,
-            "subBotUid": "998", 
-            "subBotToken": bot_token_doc,
-            "pubBotUid": "998",
-            "pubBotToken": bot_token_doc
-        }
-    }
-    
-    # El bot del doctor SOLO escucha al doctor para máxima precisión
-    if doctor_uid:
-        payload_doc["rtcConfig"]["subscribeAudioUid"] = [str(doctor_uid)]
-
-    if spoken_lang != subtitle_lang:
-        payload_doc["translateConfig"] = {
-            "enable": True,
-            "languages": [{"source": spoken_lang, "target": [azure_target]}]
+    if channel_name:
+        manager.channel_configs[channel_name] = {
+            "doctorLang": spoken_lang,
+            "patientLang": subtitle_lang
         }
 
-    start_resp_doc = requests.post(join_url, json=payload_doc, headers=headers)
-    if start_resp_doc.status_code != 200:
-        raise HTTPException(status_code=500, detail=f"Failed to start Doc STT: {start_resp_doc.text}")
-    
-    task_id_doc = start_resp_doc.json().get("taskId") or start_resp_doc.json().get("agent_id")
-
-    # 2. BOT PARA EL PACIENTE (Entiende subtitle_lang, traduce a spoken_lang)
-    # SOLO se lanza si el paciente ya está en la sala y los idiomas son distintos
-    task_id_pat = None
-    if patient_uid and spoken_lang != subtitle_lang:
-        bot_token_pat = RtcTokenBuilder.buildTokenWithUid(
-            APP_ID, APP_CERTIFICATE, channel_name, 999, 1, int(time.time()) + 7200
-        )
-        payload_pat = {
-            "name": f"stt_pat_{channel_name}_{int(time.time())}",
-            "languages": [subtitle_lang], 
-            "maxIdleTime": 60,
-            "rtcConfig": {
-                "channelName": channel_name,
-                "subBotUid": "999", 
-                "subBotToken": bot_token_pat,
-                "pubBotUid": "999",
-                "pubBotToken": bot_token_pat,
-                "subscribeAudioUid": [str(patient_uid)]
-            },
-            "translateConfig": {
-                "enable": True,
-                "languages": [{"source": subtitle_lang, "target": [azure_spoken]}]
-            }
-        }
-        
-        start_resp_pat = requests.post(join_url, json=payload_pat, headers=headers)
-        if start_resp_pat.status_code == 200:
-            task_id_pat = start_resp_pat.json().get("taskId") or start_resp_pat.json().get("agent_id")
-
-    active_tasks[channel_name] = {
-        "taskId": task_id_doc,
-        "taskIdPat": task_id_pat
-    }
-
-    return {"status": "success", "taskId": task_id_doc, "message": "Bidirectional STT joined"}
+    return {"status": "success", "message": "Subtitles AI config saved"}
 
 @app.post("/stop-subtitles")
 async def stop_subtitles(request: Request):
-    """
-    Detiene la transcripción de Agora (API v7).
-    """
-    body = await request.json()
-    channel_name = body.get("channelName")
-    
-    if channel_name not in active_tasks:
-        return {"status": "ignored", "message": "No active STT task found for this channel"}
-    
-    task_info = active_tasks[channel_name]
-    task_id_doc = task_info.get("taskId")
-    task_id_pat = task_info.get("taskIdPat")
-    
-    headers = get_basic_auth_header()
-    leave_url = f"https://api.agora.io/api/speech-to-text/v1/projects/{APP_ID}/leave"
-    
-    if task_id_doc:
-        requests.post(leave_url, json={"agent_id": task_id_doc, "taskId": task_id_doc}, headers=headers)
-    if task_id_pat:
-        requests.post(leave_url, json={"agent_id": task_id_pat, "taskId": task_id_pat}, headers=headers)
-    
-    del active_tasks[channel_name]
+    # No hay bots que detener
     return {"status": "success", "message": "Subtitles AI stopped"}
+
+@app.get("/room-config/{channel_name}")
+def get_room_config(channel_name: str):
+    """El frontend del paciente llama a esto para saber qué idioma hablar"""
+    config = manager.channel_configs.get(channel_name, {"doctorLang": "es-ES", "patientLang": "en-US"})
+    return config
+
+@app.websocket("/ws/subtitles/{channel_name}")
+async def websocket_endpoint(websocket: WebSocket, channel_name: str):
+    """
+    Recibe los textos de Deepgram desde el navegador, los traduce con DeepL,
+    y los retransmite a toda la sala.
+    """
+    await manager.connect(websocket, channel_name)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            payload = json.loads(data)
+            
+            uid = payload.get("uid")
+            is_doctor = payload.get("isDoctor", False)
+            original_text = payload.get("text", "")
+            
+            if not original_text.strip():
+                continue
+                
+            config = manager.channel_configs.get(channel_name, {"doctorLang": "es-ES", "patientLang": "en-US"})
+            doc_lang = config["doctorLang"]
+            pat_lang = config["patientLang"]
+            
+            source_lang = doc_lang if is_doctor else pat_lang
+            target_lang = pat_lang if is_doctor else doc_lang
+            
+            # Solo traducir si son diferentes
+            translated_text = original_text
+            if source_lang.split("-")[0] != target_lang.split("-")[0]:
+                translated_text = translate_text(original_text, source_lang, target_lang)
+                
+            # Broadcast a la sala
+            await manager.broadcast({
+                "uid": uid,
+                "isDoctor": is_doctor,
+                "original": original_text,
+                "translated": translated_text,
+                "sourceLang": source_lang,
+                "targetLang": target_lang
+            }, channel_name)
+            
+    except WebSocketDisconnect:
+        manager.disconnect(websocket, channel_name)
 
 if __name__ == "__main__":
     import uvicorn
