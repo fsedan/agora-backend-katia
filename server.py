@@ -135,6 +135,11 @@ async def start_subtitles(request: Request):
             "doctorLang": spoken_lang,
             "patientLang": subtitle_lang
         }
+        await manager.broadcast({
+            "type": "CONFIG_UPDATE",
+            "doctorLang": spoken_lang,
+            "patientLang": subtitle_lang
+        }, channel_name)
 
     return {"status": "success", "message": "Subtitles AI config saved"}
 
